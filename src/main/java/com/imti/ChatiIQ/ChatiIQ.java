@@ -9,7 +9,7 @@ public class ChatiIQ {
 	public static void main(String[] args) {
 		SpringApplication.run(ChatiIQ.class, args);
 
-        System.out.println("PROPERTY: " + System.getProperty("DB_URL"));
+
 	}
 
 }
