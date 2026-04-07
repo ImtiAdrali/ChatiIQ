@@ -11,6 +11,7 @@ import com.imti.ChatiIQ.repository.MessageRepository;
 import jakarta.transaction.Transactional;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -100,5 +101,56 @@ public class ChatService {
     }
 
 
+    public Flux<String> streamChat(Long conversationId, String userMessage) {
+        int MAX_MESSAGES = 10;
+        Conversation conversationTemp;
 
+        if (conversationId == null) {
+            conversationTemp = new Conversation();
+            conversationTemp.setTitle("New Chat");
+            conversationTemp.setCreatedAt(LocalDateTime.now());
+            conversationTemp = conversationRepository.save(conversationTemp);
+        } else {
+            conversationTemp = conversationRepository.findById(conversationId).orElseThrow();
+        }
+
+        List<Message> history = messageRepository.findByConversationIdOrderByTimestampAsc(conversationTemp.getId());
+
+        if (history.size() > MAX_MESSAGES) {
+            history = history.subList(history.size() - MAX_MESSAGES, history.size());
+        }
+
+        ChatClient.ChatClientRequestSpec prompt = chatClient.prompt();
+        for (Message msg: history) {
+            if (msg.getSender_role() == Role.USER) {
+                prompt = prompt.user(msg.getContent());
+            } else {
+                prompt = prompt.system(msg.getContent());
+            }
+        }
+
+        prompt = prompt.user(userMessage);
+
+        Flux<String> responseStream = prompt
+                .stream()
+                .content();
+
+        Message userMsg = new Message();
+        userMsg.setSender_role(Role.USER);
+        userMsg.setContent(userMessage);
+        userMsg.setTimestamp(LocalDateTime.now());
+        userMsg.setConversation(conversationTemp);
+        messageRepository.save(userMsg);
+
+        StringBuilder fullResponse = new StringBuilder();
+        final Conversation conversation = conversationTemp;
+        return responseStream.doOnNext(fullResponse::append).doOnComplete(() -> {
+            Message aiMsg = new Message();
+            aiMsg.setSender_role(Role.ASSISTANT);
+            aiMsg.setContent(fullResponse.toString());
+            aiMsg.setTimestamp(LocalDateTime.now());
+            aiMsg.setConversation(conversation);
+            messageRepository.save(aiMsg);
+        });
+    }
 }
