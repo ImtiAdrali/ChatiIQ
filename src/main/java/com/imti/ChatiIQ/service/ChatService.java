@@ -37,50 +37,16 @@ public class ChatService {
     public ChatResponse chat(Long conversionId, String userMessage) {
 
         int MAX_MESSAGES = 10;
-        Conversation conversation;
+        Conversation conversation = getOrCreateConversation(conversionId);
 
-        if (conversionId == null) {
-            conversation = new Conversation();
-            conversation.setTitle("New Chat");
-            conversation.setCreatedAt(LocalDateTime.now());
-            conversation = conversationRepository.save(conversation);
-        } else {
-            conversation = conversationRepository.findById(conversionId).orElseThrow();
-        }
+        List<Message> history = getRecentMessages(conversation.getId(), MAX_MESSAGES);
 
-        List<Message> history = messageRepository.findByConversationIdOrderByTimestampAsc(conversation.getId());
-
-        if (history.size() > MAX_MESSAGES) {
-            history = history.subList(history.size() - MAX_MESSAGES, history.size());
-        }
-
-        ChatClient.ChatClientRequestSpec prompt = chatClient.prompt();
-        for (Message msg: history) {
-            if (msg.getSender_role() == Role.USER) {
-                prompt = prompt.user(msg.getContent());
-            } else {
-                prompt = prompt.system(msg.getContent());
-            }
-        }
-
-        prompt = prompt.user(userMessage);
+        ChatClient.ChatClientRequestSpec prompt = buildPrompt(history, userMessage);
 
         String aiResponse = prompt.call().content();
 
-        Message userMsg = new Message();
-        userMsg.setSender_role(Role.USER);
-        userMsg.setContent(userMessage);
-        userMsg.setTimestamp(LocalDateTime.now());
-        userMsg.setConversation(conversation);
-        messageRepository.save(userMsg);
-
-        Message aiMsg = new Message();
-        aiMsg.setSender_role(Role.ASSISTANT);
-        aiMsg.setContent(aiResponse);
-        aiMsg.setTimestamp(LocalDateTime.now());
-        aiMsg.setConversation(conversation);
-        messageRepository.save(aiMsg);
-
+        saveUserMessage(conversation, userMessage);
+        saveAssistantMessages(conversation, aiResponse);
 
         return new ChatResponse(aiResponse);
     }
@@ -103,24 +69,45 @@ public class ChatService {
 
     public Flux<String> streamChat(Long conversationId, String userMessage) {
         int MAX_MESSAGES = 10;
-        Conversation conversationTemp;
 
+        Conversation conversation = getOrCreateConversation(conversationId);
+        List<Message> history = getRecentMessages(conversation.getId(), MAX_MESSAGES);
+
+        ChatClient.ChatClientRequestSpec prompt = buildPrompt(history, userMessage);
+
+        Flux<String> responseStream = prompt
+                .stream()
+                .content();
+
+       saveUserMessage(conversation, userMessage);
+
+        StringBuilder fullResponse = new StringBuilder();
+        return responseStream.doOnNext(fullResponse::append).doOnComplete(() -> {
+            saveAssistantMessages(conversation, fullResponse.toString());
+        });
+    }
+
+    private Conversation getOrCreateConversation(Long conversationId) {
         if (conversationId == null) {
-            conversationTemp = new Conversation();
-            conversationTemp.setTitle("New Chat");
-            conversationTemp.setCreatedAt(LocalDateTime.now());
-            conversationTemp = conversationRepository.save(conversationTemp);
-        } else {
-            conversationTemp = conversationRepository.findById(conversationId).orElseThrow();
+            Conversation convo = new Conversation();
+            convo.setTitle("New Chat");
+            convo.setCreatedAt(LocalDateTime.now());
+            return conversationRepository.save(convo);
         }
+        return conversationRepository.findById(conversationId).orElseThrow();
+    }
 
-        List<Message> history = messageRepository.findByConversationIdOrderByTimestampAsc(conversationTemp.getId());
-
-        if (history.size() > MAX_MESSAGES) {
-            history = history.subList(history.size() - MAX_MESSAGES, history.size());
+    private List<Message> getRecentMessages(Long conversationId, int maxMessages) {
+        List<Message> history = messageRepository.findByConversationIdOrderByTimestampAsc(conversationId);
+        if (history.size() > maxMessages) {
+            return history.subList(history.size() - maxMessages, history.size());
         }
+        return history;
+    }
 
+    private ChatClient.ChatClientRequestSpec buildPrompt(List<Message> history, String userMessage) {
         ChatClient.ChatClientRequestSpec prompt = chatClient.prompt();
+
         for (Message msg: history) {
             if (msg.getSender_role() == Role.USER) {
                 prompt = prompt.user(msg.getContent());
@@ -129,28 +116,26 @@ public class ChatService {
             }
         }
 
-        prompt = prompt.user(userMessage);
+        return prompt.user(userMessage);
+    }
 
-        Flux<String> responseStream = prompt
-                .stream()
-                .content();
+    private void saveUserMessage(Conversation conversation, String content) {
+        Message msg = Message.builder()
+                .sender_role(Role.USER)
+                .content(content)
+                .timestamp(LocalDateTime.now())
+                .conversation(conversation)
+                .build();
+        messageRepository.save(msg);
+    }
 
-        Message userMsg = new Message();
-        userMsg.setSender_role(Role.USER);
-        userMsg.setContent(userMessage);
-        userMsg.setTimestamp(LocalDateTime.now());
-        userMsg.setConversation(conversationTemp);
-        messageRepository.save(userMsg);
-
-        StringBuilder fullResponse = new StringBuilder();
-        final Conversation conversation = conversationTemp;
-        return responseStream.doOnNext(fullResponse::append).doOnComplete(() -> {
-            Message aiMsg = new Message();
-            aiMsg.setSender_role(Role.ASSISTANT);
-            aiMsg.setContent(fullResponse.toString());
-            aiMsg.setTimestamp(LocalDateTime.now());
-            aiMsg.setConversation(conversation);
-            messageRepository.save(aiMsg);
-        });
+    private void saveAssistantMessages(Conversation conversation, String content) {
+        Message msg = Message.builder()
+                .sender_role(Role.ASSISTANT)
+                .content(content)
+                .timestamp(LocalDateTime.now())
+                .conversation(conversation)
+                .build();
+        messageRepository.save(msg);
     }
 }
